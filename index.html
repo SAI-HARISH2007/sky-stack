@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Sky Stack — Playable Ad</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { height:100%; overflow:hidden; font-family:system-ui, "Segoe UI", Arial, sans-serif; }
+  body { background:linear-gradient(170deg, #0e1b3d, #27457e 55%, #4d6fae); display:flex; align-items:center; justify-content:center; }
+  #stage { position:relative; width:min(100vw, 58vh, 420px); user-select:none; }
+  #hud { display:flex; justify-content:space-between; align-items:center; padding:10px 6px 8px; color:#fff; }
+  #hud .title { font-weight:800; letter-spacing:.5px; font-size:clamp(15px, 4.2vw, 20px); text-shadow:0 2px 6px rgba(0,0,0,.4); }
+  #hud .score { background:rgba(255,255,255,.14); border:1px solid rgba(255,255,255,.25); border-radius:999px; padding:4px 14px; font-weight:700; font-size:clamp(13px, 3.6vw, 16px); }
+  #hud .score b { color:#ffd34d; }
+  canvas { display:block; width:100%; border-radius:16px; box-shadow:0 14px 40px rgba(0,0,0,.45); touch-action:none; cursor:pointer; }
+  #tap { position:absolute; top:55%; left:0; right:0; text-align:center; color:#fff; font-size:clamp(18px, 5.5vw, 26px); font-weight:800; text-shadow:0 3px 10px rgba(0,0,0,.6); pointer-events:none; animation:bob 1s ease-in-out infinite; }
+  @keyframes bob { 0%,100% { transform:translateY(0);} 50% { transform:translateY(-10px);} }
+  #endcard { position:absolute; inset:0; display:none; align-items:center; justify-content:center; flex-direction:column; gap:14px; background:rgba:0; background:rgba(8,14,40,.85); backdrop-filter:blur(4px); border-radius:16px; text-align:center; padding:24px; animation:fadein .4s ease; }
+  #endcard.show { display:flex; }
+  @keyframes fadein { from { opacity:0; transform:scale(.96);} to { opacity:1; transform:scale(1);} }
+  #endcard h1 { color:#fff; font-size:clamp(24px, 7vw, 36px); text-shadow:0 3px 10px rgba(0,0,0,.5); }
+  #endcard p { color:rgba(255,255,255,.85); font-size:clamp(13px, 3.8vw, 16px); max-width:280px; }
+  #cta { background:linear-gradient(180deg, #ffd34d, #ff8c42); border:none; color:#4a1d00; font-weight:800; font-size:clamp(16px, 5vw, 21px); padding:14px 44px; border-radius:999px; cursor:pointer; box-shadow:0 8px 22px rgba(255,140,66,.45); animation:pulse 1.3s ease-in-out infinite; letter-spacing:.5px; }
+  @keyframes pulse { 0%,100% { transform:scale(1);} 50% { transform:scale(1.07);} }
+  #replay { background:none; border:none; color:rgba(255,255,255,.7); font-size:14px; text-decoration:underline; cursor:pointer; }
+  #badge { position:absolute; top:-8px; left:50%; transform:translateX(-50%) rotate(-2deg); background:#ffb347; color:#4a1d00; font-size:10px; font-weight:800; letter-spacing:1px; padding:3px 10px; border-radius:4px; text-transform:uppercase; z-index:6; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="badge">Playable ad demo</div>
+  <div id="hud">
+    <div class="title">🏙️ Sky Stack</div>
+    <div class="score">Floor <b id="score">0</b></div>
+  </div>
+  <canvas id="game"></canvas>
+  <div id="tap">👆 TAP to drop!</div>
+  <div id="endcard">
+    <h1 id="endtitle">Tower down!</h1>
+    <p id="endmsg"></p>
+    <button id="cta">PLAY FREE</button>
+    <button id="replay">Try again</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+// Sky Stack — a tap-timing stacker playable in one file. No libraries.
+// A block slides back and forth; tap to drop it on the tower. The overhang is
+// sliced off and falls away, so sloppy taps shrink the tower until you miss.
+
+const W = 400, H = 640, BH = 34, BASE_W = 190, PERFECT = 7;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let scale = 1;
+function resize() {
+  const w = canvas.clientWidth;
+  canvas.width = Math.round(w * devicePixelRatio);
+  canvas.height = Math.round(w * H / W * devicePixelRatio);
+  scale = canvas.width / W;
+}
+
+let stack, moving, cuts, floaters, clouds, cam, camTarget, state, combo, shake;
+// state: 'play' | 'ended'
+
+function hue(i) { return (205 + i * 9) % 360; }
+function blockY(i) { return H - 70 - i * BH; }   // world y of block i's top (before cam)
+
+function reset() {
+  stack = [{ x: (W - BASE_W) / 2, w: BASE_W }];
+  cuts = []; floaters = []; shake = 0;
+  cam = 0; camTarget = 0; combo = 0;
+  clouds = Array.from({ length: 6 }, (_, i) => ({
+    x: Math.random() * W, y: 90 + i * 95, s: 0.5 + Math.random() * 0.7, v: 4 + Math.random() * 8 }));
+  state = 'play';
+  document.getElementById('score').textContent = 0;
+  document.getElementById('tap').style.display = 'block';
+  newMoving();
+}
+
+function newMoving() {
+  const i = stack.length;
+  const top = stack[i - 1];
+  const fromLeft = i % 2 === 1;
+  moving = {
+    w: top.w,
+    x: fromLeft ? -top.w : W,
+    dir: fromLeft ? 1 : -1,
+    speed: Math.min(150 + i * 14, 420),
+    i,
+  };
+}
+
+function drop(forcedX) {
+  if (state !== 'play' || !moving) return;
+  document.getElementById('tap').style.display = 'none';
+  if (forcedX !== undefined) moving.x = forcedX;
+  const top = stack[stack.length - 1];
+  const left = Math.max(moving.x, top.x);
+  const right = Math.min(moving.x + moving.w, top.x + top.w);
+  const ow = right - left;
+  const y = blockY(moving.i);
+
+  if (ow <= 2) {                       // clean miss: whole block falls, game over
+    cuts.push({ x: moving.x, y, w: moving.w, vy: -60, vr: moving.dir * 2.4, rot: 0, i: moving.i });
+    moving = null;
+    return setTimeout(endGame, 900);
+  }
+  if (Math.abs(moving.x - top.x) < PERFECT) {   // perfect: keep full width
+    stack.push({ x: top.x, w: top.w });
+    combo++;
+    floater(combo > 1 ? `PERFECT ×${combo}!` : 'PERFECT!', y, '#ffd34d');
+    ring(top.x + top.w / 2, y + BH / 2);
+  } else {
+    combo = 0;
+    stack.push({ x: left, w: ow });
+    // the sliced overhang falls away
+    const cutW = moving.w - ow;
+    const cutX = moving.x < top.x ? moving.x : right;
+    cuts.push({ x: cutX, y, w: cutW, vy: 0, vr: (cutX < left ? -1 : 1) * 2, rot: 0, i: moving.i });
+    shake = 0.18;
+  }
+  document.getElementById('score').textContent = stack.length - 1;
+  camTarget = Math.max(0, (stack.length - 9)) * BH;
+  newMoving();
+}
+
+function floater(text, y, color) {
+  floaters.push({ text, x: W / 2, y, life: 1, color });
+}
+let rings = [];
+function ring(x, y) { rings.push({ x, y, r: 10, life: 1 }); }
+
+function endGame() {
+  if (state === 'ended') return;
+  state = 'ended';
+  const n = stack.length - 1;
+  document.getElementById('endtitle').textContent = n >= 15 ? 'Incredible! 🏆' : 'Tower down! 🏗️';
+  document.getElementById('endmsg').textContent =
+    `You stacked ${n} floor${n === 1 ? '' : 's'}. Think you can build higher?`;
+  document.getElementById('endcard').classList.add('show');
+}
+
+document.getElementById('cta').addEventListener('click', () => {
+  alert('In a real campaign this button opens the App Store / Play Store listing.');
+});
+document.getElementById('replay').addEventListener('click', () => {
+  document.getElementById('endcard').classList.remove('show');
+  reset();
+});
+
+function onTap(e) { drop(); if (e.cancelable) e.preventDefault(); }
+canvas.addEventListener('mousedown', onTap);
+canvas.addEventListener('touchstart', onTap, { passive: false });
+window.addEventListener('keydown', e => { if (e.code === 'Space') drop(); });
+
+// --- render ------------------------------------------------------------
+function roundBlock(x, y, w, h, hu, light) {
+  const g = ctx.createLinearGradient(x, y, x, y + h);
+  g.addColorStop(0, `hsl(${hu} 70% ${light + 12}%)`);
+  g.addColorStop(1, `hsl(${hu} 70% ${light}%)`);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, 6); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.25)';
+  ctx.beginPath(); ctx.roundRect(x, y, w, 6, 3); ctx.fill();
+  // windows
+  ctx.fillStyle = 'rgba(255,245,180,.5)';
+  for (let wx = x + 12; wx < x + w - 12; wx += 24) ctx.fillRect(wx, y + 14, 9, 11);
+}
+
+function draw(dt, t) {
+  ctx.save();
+  ctx.scale(scale, scale);
+  // sky shifts with height
+  const alt = Math.min(1, (stack.length - 1) / 30);
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, `hsl(${225 - alt * 40} 60% ${14 + alt * 8}%)`);
+  bg.addColorStop(1, `hsl(${215 - alt * 30} 55% ${38 + alt * 10}%)`);
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+  cam += (camTarget - cam) * Math.min(1, dt * 6);
+  if (shake > 0) shake = Math.max(0, shake - dt);
+  ctx.save();
+  if (shake > 0) ctx.translate((Math.random() - .5) * shake * 30, (Math.random() - .5) * shake * 30);
+
+  // clouds drift
+  for (const c of clouds) {
+    c.x += c.v * dt; if (c.x > W + 60) c.x = -60;
+    const cy = c.y + cam * 0.4;
+    if (cy < -40 || cy > H + 40) continue;
+    ctx.fillStyle = 'rgba(255,255,255,.14)';
+    ctx.beginPath();
+    ctx.ellipse(c.x, cy, 42 * c.s, 14 * c.s, 0, 0, Math.PI * 2);
+    ctx.ellipse(c.x + 24 * c.s, cy - 8 * c.s, 26 * c.s, 11 * c.s, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ground
+  ctx.fillStyle = '#2b3b2d';
+  ctx.fillRect(0, H - 70 + BH + cam, W, 200);
+
+  // tower
+  for (let i = 0; i < stack.length; i++) {
+    const b = stack[i];
+    const y = blockY(i) + cam;
+    if (y > H + BH || y < -BH) continue;
+    roundBlock(b.x, y, b.w, BH, hue(i), 48);
+  }
+  // moving block
+  if (moving && state === 'play') {
+    roundBlock(moving.x, blockY(moving.i) + cam, moving.w, BH, hue(moving.i), 58);
+  }
+  // falling cut pieces
+  cuts = cuts.filter(c => c.y < H + 400 / 1);
+  for (const c of cuts) {
+    c.vy += 1300 * dt; c.y += c.vy * dt; c.rot += c.vr * dt;
+    ctx.save();
+    ctx.translate(c.x + c.w / 2, c.y + BH / 2 + cam);
+    ctx.rotate(c.rot);
+    ctx.globalAlpha = 0.9;
+    roundBlock(-c.w / 2, -BH / 2, c.w, BH, hue(c.i), 40);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+  // perfect rings
+  rings = rings.filter(r => r.life > 0);
+  for (const r of rings) {
+    r.life -= dt * 2; r.r += 160 * dt;
+    ctx.globalAlpha = Math.max(0, r.life);
+    ctx.strokeStyle = '#ffd34d'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(r.x, r.y + cam, r.r, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  // floaters
+  floaters = floaters.filter(f => f.life > 0);
+  for (const f of floaters) {
+    f.life -= dt * 1.1; f.y -= 50 * dt;
+    ctx.globalAlpha = Math.max(0, f.life);
+    ctx.fillStyle = f.color;
+    ctx.font = '800 26px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText(f.text, f.x, f.y + cam);
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+  ctx.restore();
+}
+
+// --- loop --------------------------------------------------------------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (moving && state === 'play') {
+    moving.x += moving.dir * moving.speed * dt;
+    const m = 30;
+    if (moving.x < -m && moving.dir < 0) moving.dir = 1;
+    if (moving.x + moving.w > W + m && moving.dir > 0) moving.dir = -1;
+  }
+  draw(dt, now / 1000);
+  requestAnimationFrame(frame);
+}
+
+reset();
+resize();
+window.addEventListener('resize', resize);
+requestAnimationFrame(frame);
+
+// QA hooks (headless tests): #place=0,-10,8,... drops blocks at those offsets from
+// the top block's x, synchronously. An offset beyond the block width forces a miss.
+const qa = Object.fromEntries(location.hash.slice(1).split('&').filter(Boolean).map(s => s.split('=')));
+if (qa.place) setTimeout(() => {
+  for (const o of qa.place.split(',')) {
+    if (state !== 'play' || !moving) break;
+    drop(stack[stack.length - 1].x + Number(o));
+  }
+}, 300);
+</script>
+</body>
+</html>
